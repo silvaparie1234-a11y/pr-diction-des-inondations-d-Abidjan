@@ -11,7 +11,8 @@ st.set_page_config(page_title="Abidjan Flood Sentinel Pro", layout="wide")
 # --- CHARGEMENT DU MODÈLE ---
 @st.cache_resource
 def load_model():
-    return joblib.load('models/flood_xgboost.pkl')
+# On retire 'models/' car le fichier est à la racine sur ton GitHub
+return joblib.load('flood_xgboost.pkl')
 
 model = load_model()
 
@@ -100,4 +101,5 @@ with tab2:
     st.plotly_chart(fig)
 
 if proba > 0.7:
+
     st.error(f"⚠️ URGENCE : La commune de {selected_commune} présente un risque critique d'inondation. Déclenchement du plan ORSEC suggéré.")
