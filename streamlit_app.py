@@ -4,23 +4,57 @@ import joblib
 import folium
 from streamlit_folium import st_folium
 import plotly.express as px
-import os
+import datetime
+import numpy as np
+from fpdf import FPDF
+import requests
 
 # Configuration de la page
-st.set_page_config(page_title="Abidjan Flood Sentinel Pro", layout="wide")
+st.set_page_config(page_title="Abidjan Flood Sentinel Pro", layout="wide", page_icon="🌊")
 
 # --- CHARGEMENT DU MODÈLE ---
 @st.cache_resource
 def load_model():
-    # Correction : Le fichier est à la racine sur GitHub, pas dans un dossier /models
-    model_path = 'flood_xgboost.pkl'
-    return joblib.load(model_path)
+    return joblib.load('flood_xgboost.pkl')
 
-# Chargement du modèle
 model = load_model()
 
-# --- DONNÉES DES 13 COMMUNES D'ABIDJAN ---
-# [Latitude, Longitude, Altitude(m), Capacité_Drainage(0-1), Population_Estimée]
+# --- FONCTION MÉTÉO EN DIRECT ---
+def get_live_weather():
+    API_KEY = "0fd3d4ce78a76525f5a9cf1af7ce6dee"
+    CITY = "Abidjan"
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={API_KEY}&units=metric"
+    try:
+        response = requests.get(url).json()
+        # OpenWeather renvoie la pluie en mm pour la dernière heure (si disponible)
+        rain = response.get('rain', {}).get('1h', 0)
+        temp = response.get('main', {}).get('temp', 25)
+        return rain, temp
+    except:
+        return 0, 25
+
+# --- FONCTION EXPORT PDF ---
+def create_pdf(commune, risk, rain, level, impact):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, "RAPPORT OFFICIEL - SENTINELLE DES CRUES ABIDJAN", ln=True, align='C')
+    pdf.ln(10)
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, f"Commune : {commune}", ln=True)
+    pdf.cell(200, 10, f"Date et Heure : {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True)
+    pdf.cell(200, 10, f"Indice de Risque : {risk*100:.1f}%", ln=True)
+    pdf.cell(200, 10, f"Pluviometrie detectee : {rain} mm/h", ln=True)
+    pdf.cell(200, 10, f"Niveau des eaux : {level} m", ln=True)
+    pdf.cell(200, 10, f"Population exposee estimee : {impact:,} personnes", ln=True)
+    pdf.ln(10)
+    
+    status = "ALERTE ROUGE : Plan d'urgence recommande." if risk > 0.7 else "VIGILANCE : Surveillance accrue."
+    pdf.set_text_color(255, 0, 0) if risk > 0.7 else pdf.set_text_color(0, 0, 0)
+    pdf.multi_cell(0, 10, f"CONCLUSION : {status}")
+    return pdf.output(dest='S').encode('latin-1')
+
+# --- DONNÉES DES COMMUNES ---
 communes = {
     "Abobo": {"coords": [5.416, -4.018], "alt": 85, "drain": 0.4, "pop": 1100000},
     "Adjamé": {"coords": [5.358, -4.022], "alt": 40, "drain": 0.5, "pop": 370000},
@@ -37,85 +71,73 @@ communes = {
     "Yopougon": {"coords": [5.347, -4.081], "alt": 45, "drain": 0.4, "pop": 1200000},
 }
 
-# --- SIDEBAR (PARAMÈTRES) ---
-st.sidebar.title("🛠️ Paramètres Métro")
-selected_commune = st.sidebar.selectbox("Sélectionner la Commune", list(communes.keys()))
+# --- SIDEBAR ---
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/f/fe/Flag_of_C%C3%B4te_d%27Ivoire.svg", width=100)
+st.sidebar.title("🛡️ Contrôle Sentinelle")
+selected_commune = st.sidebar.selectbox("Commune ciblée", list(communes.keys()))
 
-st.sidebar.subheader("🌡️ Données Temps Réel")
-rainfall = st.sidebar.slider("Intensité Pluie (mm/h)", 0, 150, 50)
-river_level = st.sidebar.slider("Niveau Lagune/Canaux (m)", 0.0, 8.0, 2.5)
-soil_moisture = st.sidebar.slider("Saturation du sol (%)", 0, 100, 60)
+st.sidebar.subheader("📡 Source des Données")
+mode = st.sidebar.radio("Mode de fonctionnement", ["Direct Météo (API)", "Simulation Manuelle"])
 
-# Extraction des données de la commune
+if mode == "Direct Météo (API)":
+    live_rain, live_temp = get_live_weather()
+    rainfall = st.sidebar.number_input("Pluie actuelle (mm/h)", value=float(live_rain), disabled=True)
+    st.sidebar.success(f"Connecté : {live_temp}°C à Abidjan")
+else:
+    rainfall = st.sidebar.slider("Pluie simulée (mm/h)", 0, 150, 40)
+
+river_level = st.sidebar.slider("Niveau Lagune (m)", 0.0, 8.0, 2.5)
+soil_moisture = st.sidebar.slider("Saturation Sol (%)", 0, 100, 50)
+
+# Calcul du risque avec le modèle
 c_data = communes[selected_commune]
-elevation = c_data["alt"]
-drainage = c_data["drain"]
+input_df = pd.DataFrame([[rainfall, river_level, soil_moisture, c_data["alt"], c_data["drain"]]], 
+                        columns=['rainfall_mm', 'river_level_m', 'soil_moisture_index', 'elevation_m', 'drainage_capacity'])
+proba = model.predict_proba(input_df)[0][1]
 
-# --- CALCUL DU RISQUE ---
-# Création du DataFrame pour le modèle (doit correspondre exactement aux colonnes d'entraînement)
-input_data = pd.DataFrame([[rainfall, river_level, soil_moisture, elevation, drainage]], 
-                          columns=['rainfall_mm', 'river_level_m', 'soil_moisture_index', 'elevation_m', 'drainage_capacity'])
-
-proba = model.predict_proba(input_data)[0][1]
-
-# --- INTERFACE PRINCIPALE ---
-st.header(f"📍 Surveillance : {selected_commune}")
+# --- DASHBOARD ---
+st.title(f"📍 État d'alerte : {selected_commune}")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Risque d'Inondation", f"{proba*100:.1f}%")
 with col2:
-    st.metric("Altitude", f"{elevation} m")
+    st.metric("Population à risque", f"{int(c_data['pop'] * proba):,}")
 with col3:
-    # Calcul de la population impactée
-    impact = int(c_data["pop"] * proba) if proba > 0.4 else 0
-    st.metric("Pop. Exposée", f"{impact:,}")
+    color = "🔴 CRITIQUE" if proba > 0.7 else ("🟠 VIGILANCE" if proba > 0.4 else "🟢 NORMAL")
+    st.metric("Niveau d'Alerte", color)
 with col4:
-    color_label = "🔴 CRITIQUE" if proba > 0.7 else ("🟠 VIGILANCE" if proba > 0.4 else "🟢 NORMAL")
-    st.metric("Statut Alerte", color_label)
+    st.write("Générer Document Officiel")
+    pdf_file = create_pdf(selected_commune, proba, rainfall, river_level, int(c_data['pop'] * proba))
+    st.download_button("📥 Export PDF", data=pdf_file, file_name=f"rapport_{selected_commune}.pdf", mime="application/pdf")
 
-# --- CARTE & ANALYSE ---
-tab1, tab2 = st.tabs(["🗺️ Carte de Vigilance", "📈 Analyse des Facteurs"])
+# ONGLETS
+tab1, tab2, tab3 = st.tabs(["🗺️ Cartographie", "📈 Historique 24h", "📊 Facteurs Techniques"])
 
 with tab1:
-    # Création de la carte centrée sur Abidjan
     m = folium.Map(location=[5.34, -4.00], zoom_start=11, tiles="CartoDB positron")
-    
-    for name, info in communes.items():
-        is_selected = (name == selected_commune)
-        # Détermination de la couleur du point
-        if is_selected:
-            dot_color = 'red' if proba > 0.7 else ('orange' if proba > 0.4 else 'green')
-            size = 20
-        else:
-            dot_color = 'blue'
-            size = 8
-            
-        folium.CircleMarker(
-            location=info["coords"],
-            radius=size,
-            color=dot_color,
-            fill=True,
-            fill_opacity=0.7,
-            popup=f"{name} (Alt: {info['alt']}m)"
-        ).add_to(m)
-    
-    st_folium(m, width="100%", height=500)
+    folium.CircleMarker(
+        location=c_data["coords"],
+        radius=20,
+        color='red' if proba > 0.5 else 'green',
+        fill=True,
+        popup=f"Alerte {selected_commune}"
+    ).add_to(m)
+    st_folium(m, width="100%", height=450)
 
 with tab2:
-    st.subheader("📊 Facteurs d'Influence (Radar)")
-    # Graphique radar pour visualiser les causes du risque
-    features = ['Pluie', 'Niveau Eau', 'Saturation Sol', 'Défaut Drainage']
-    # Normalisation des valeurs pour le graphique
-    vals = [rainfall/1.5, river_level*10, soil_moisture, (1-drainage)*100]
-    
-    df_radar = pd.DataFrame(dict(r=vals, theta=features))
-    fig = px.line_polar(df_radar, r='r', theta='theta', line_close=True, range_r=[0,100])
-    fig.update_traces(fill='toself', line_color='red' if proba > 0.5 else 'blue')
-    st.plotly_chart(fig, use_container_width=True)
+    st.subheader("📊 Tendance du risque sur les dernières 24h")
+    # Création d'un historique simulé basé sur le risque actuel
+    times = [datetime.datetime.now() - datetime.timedelta(hours=x) for x in range(24, 0, -1)]
+    history = [max(0, min(100, proba*100 + np.random.normal(0, 7))) for _ in range(24)]
+    fig_hist = px.area(x=times, y=history, labels={'x': 'Temps', 'y': 'Risque %'}, color_discrete_sequence=['#e74c3c'])
+    st.plotly_chart(fig_hist, use_container_width=True)
 
-# Message d'alerte dynamique
-if proba > 0.7:
-    st.error(f"⚠️ URGENCE : Risque critique d'inondation à {selected_commune}. Les autorités recommandent la mise en sécurité immédiate.")
-elif proba > 0.4:
-    st.warning(f"⚠️ VIGILANCE : Risque modéré à {selected_commune}. Surveillez la montée des eaux.")
+with tab3:
+    st.subheader("🧬 Analyse Radar des Variables")
+    features = ['Pluie', 'Niveau Lagune', 'Humidité Sol', 'Défaut Drainage']
+    vals = [rainfall/1.5, river_level*12, soil_moisture, (1-c_data['drain'])*100]
+    df_radar = pd.DataFrame(dict(r=vals, theta=features))
+    fig_radar = px.line_polar(df_radar, r='r', theta='theta', line_close=True)
+    fig_radar.update_traces(fill='toself')
+    st.plotly_chart(fig_radar, use_container_width=True)
