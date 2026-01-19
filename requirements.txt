@@ -6,4 +6,5 @@ joblib
 folium
 streamlit-folium
 plotly
-scikit-learn
+requests
+fpdf
