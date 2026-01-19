@@ -8,9 +8,35 @@ import datetime
 import numpy as np
 from fpdf import FPDF
 import requests
+import sqlite3  # Pour la base de données
 
-# Configuration de la page
+# --- CONFIGURATION ---
 st.set_page_config(page_title="Abidjan Flood Sentinel Pro", layout="wide", page_icon="🌊")
+
+# --- INITIALISATION BASE DE DONNÉES ---
+def init_db():
+    conn = sqlite3.connect('flood_history.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS history 
+                 (timestamp DATETIME, commune TEXT, risk REAL, rain REAL)''')
+    conn.commit()
+    conn.close()
+
+def save_prediction(commune, risk, rain):
+    conn = sqlite3.connect('flood_history.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO history VALUES (?, ?, ?, ?)", 
+              (datetime.datetime.now(), commune, risk*100, rain))
+    conn.commit()
+    conn.close()
+
+def get_history():
+    conn = sqlite3.connect('flood_history.db')
+    df = pd.read_sql_query("SELECT * FROM history ORDER BY timestamp DESC LIMIT 50", conn)
+    conn.close()
+    return df
+
+init_db()
 
 # --- CHARGEMENT DU MODÈLE ---
 @st.cache_resource
@@ -19,42 +45,22 @@ def load_model():
 
 model = load_model()
 
-# --- FONCTION MÉTÉO EN DIRECT ---
+# --- MÉTÉO ---
 def get_live_weather():
     API_KEY = "0fd3d4ce78a76525f5a9cf1af7ce6dee"
-    CITY = "Abidjan"
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={API_KEY}&units=metric"
+    url = f"http://api.openweathermap.org/data/2.5/weather?q=Abidjan&appid={API_KEY}&units=metric"
     try:
-        response = requests.get(url).json()
-        # OpenWeather renvoie la pluie en mm pour la dernière heure (si disponible)
-        rain = response.get('rain', {}).get('1h', 0)
-        temp = response.get('main', {}).get('temp', 25)
-        return rain, temp
-    except:
-        return 0, 25
+        r = requests.get(url).json()
+        return r.get('rain', {}).get('1h', 0), r.get('main', {}).get('temp', 25)
+    except: return 0, 25
 
-# --- FONCTION EXPORT PDF ---
-def create_pdf(commune, risk, rain, level, impact):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, "RAPPORT OFFICIEL - SENTINELLE DES CRUES ABIDJAN", ln=True, align='C')
-    pdf.ln(10)
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, f"Commune : {commune}", ln=True)
-    pdf.cell(200, 10, f"Date et Heure : {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True)
-    pdf.cell(200, 10, f"Indice de Risque : {risk*100:.1f}%", ln=True)
-    pdf.cell(200, 10, f"Pluviometrie detectee : {rain} mm/h", ln=True)
-    pdf.cell(200, 10, f"Niveau des eaux : {level} m", ln=True)
-    pdf.cell(200, 10, f"Population exposee estimee : {impact:,} personnes", ln=True)
-    pdf.ln(10)
-    
-    status = "ALERTE ROUGE : Plan d'urgence recommande." if risk > 0.7 else "VIGILANCE : Surveillance accrue."
-    pdf.set_text_color(255, 0, 0) if risk > 0.7 else pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 10, f"CONCLUSION : {status}")
-    return pdf.output(dest='S').encode('latin-1')
+# --- SIDEBAR & LOGO ---
+# Remplace l'URL par le lien de ton image sur GitHub si tu en as une
+LOGO_URL = "https://cdn-icons-png.flaticon.com/512/4005/4005817.png" 
+st.sidebar.image(LOGO_URL, width=100)
+st.sidebar.title("Flood Sentinel Pro")
 
-# --- DONNÉES DES COMMUNES ---
+# --- FORMULAIRE ---
 communes = {
     "Abobo": {"coords": [5.416, -4.018], "alt": 85, "drain": 0.4, "pop": 1100000},
     "Adjamé": {"coords": [5.358, -4.022], "alt": 40, "drain": 0.5, "pop": 370000},
@@ -71,73 +77,47 @@ communes = {
     "Yopougon": {"coords": [5.347, -4.081], "alt": 45, "drain": 0.4, "pop": 1200000},
 }
 
-# --- SIDEBAR ---
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/f/fe/Flag_of_C%C3%B4te_d%27Ivoire.svg", width=100)
-st.sidebar.title("🛡️ Contrôle Sentinelle")
-selected_commune = st.sidebar.selectbox("Commune ciblée", list(communes.keys()))
+selected_commune = st.sidebar.selectbox("Zone", list(communes.keys()))
+mode = st.sidebar.radio("Données", ["Direct Météo", "Manuel"])
 
-st.sidebar.subheader("📡 Source des Données")
-mode = st.sidebar.radio("Mode de fonctionnement", ["Direct Météo (API)", "Simulation Manuelle"])
-
-if mode == "Direct Météo (API)":
-    live_rain, live_temp = get_live_weather()
-    rainfall = st.sidebar.number_input("Pluie actuelle (mm/h)", value=float(live_rain), disabled=True)
-    st.sidebar.success(f"Connecté : {live_temp}°C à Abidjan")
+if mode == "Direct Météo":
+    rain, temp = get_live_weather()
+    st.sidebar.success(f"Direct : {temp}°C")
 else:
-    rainfall = st.sidebar.slider("Pluie simulée (mm/h)", 0, 150, 40)
+    rain = st.sidebar.slider("Pluie (mm/h)", 0, 150, 40)
 
-river_level = st.sidebar.slider("Niveau Lagune (m)", 0.0, 8.0, 2.5)
-soil_moisture = st.sidebar.slider("Saturation Sol (%)", 0, 100, 50)
+level = st.sidebar.slider("Lagune (m)", 0.0, 8.0, 2.0)
+soil = st.sidebar.slider("Sol (%)", 0, 100, 50)
 
-# Calcul du risque avec le modèle
-c_data = communes[selected_commune]
-input_df = pd.DataFrame([[rainfall, river_level, soil_moisture, c_data["alt"], c_data["drain"]]], 
-                        columns=['rainfall_mm', 'river_level_m', 'soil_moisture_index', 'elevation_m', 'drainage_capacity'])
-proba = model.predict_proba(input_df)[0][1]
+# Calcul
+c = communes[selected_commune]
+df_in = pd.DataFrame([[rain, level, soil, c['alt'], c['drain']]], columns=['rainfall_mm', 'river_level_m', 'soil_moisture_index', 'elevation_m', 'drainage_capacity'])
+proba = model.predict_proba(df_in)[0][1]
+
+# Sauvegarde automatique dans la base de données
+save_prediction(selected_commune, proba, rain)
 
 # --- DASHBOARD ---
-st.title(f"📍 État d'alerte : {selected_commune}")
+st.title(f"📍 Surveillance : {selected_commune}")
+cols = st.columns(4)
+cols[0].metric("Risque", f"{proba*100:.1f}%")
+cols[1].metric("Impact Pop.", f"{int(c['pop']*proba):,}")
+cols[2].metric("Statut", "🔴 ALERTE" if proba > 0.7 else "🟢 OK")
 
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Risque d'Inondation", f"{proba*100:.1f}%")
-with col2:
-    st.metric("Population à risque", f"{int(c_data['pop'] * proba):,}")
-with col3:
-    color = "🔴 CRITIQUE" if proba > 0.7 else ("🟠 VIGILANCE" if proba > 0.4 else "🟢 NORMAL")
-    st.metric("Niveau d'Alerte", color)
-with col4:
-    st.write("Générer Document Officiel")
-    pdf_file = create_pdf(selected_commune, proba, rainfall, river_level, int(c_data['pop'] * proba))
-    st.download_button("📥 Export PDF", data=pdf_file, file_name=f"rapport_{selected_commune}.pdf", mime="application/pdf")
+# Onglets
+t1, t2 = st.tabs(["🗺️ Carte & Radar", "📜 Historique Réel (Database)"])
 
-# ONGLETS
-tab1, tab2, tab3 = st.tabs(["🗺️ Cartographie", "📈 Historique 24h", "📊 Facteurs Techniques"])
+with t1:
+    m = folium.Map(location=[5.34, -4.00], zoom_start=11)
+    folium.CircleMarker(c['coords'], radius=20, color='red', fill=True).add_to(m)
+    st_folium(m, width="100%", height=400)
 
-with tab1:
-    m = folium.Map(location=[5.34, -4.00], zoom_start=11, tiles="CartoDB positron")
-    folium.CircleMarker(
-        location=c_data["coords"],
-        radius=20,
-        color='red' if proba > 0.5 else 'green',
-        fill=True,
-        popup=f"Alerte {selected_commune}"
-    ).add_to(m)
-    st_folium(m, width="100%", height=450)
-
-with tab2:
-    st.subheader("📊 Tendance du risque sur les dernières 24h")
-    # Création d'un historique simulé basé sur le risque actuel
-    times = [datetime.datetime.now() - datetime.timedelta(hours=x) for x in range(24, 0, -1)]
-    history = [max(0, min(100, proba*100 + np.random.normal(0, 7))) for _ in range(24)]
-    fig_hist = px.area(x=times, y=history, labels={'x': 'Temps', 'y': 'Risque %'}, color_discrete_sequence=['#e74c3c'])
-    st.plotly_chart(fig_hist, use_container_width=True)
-
-with tab3:
-    st.subheader("🧬 Analyse Radar des Variables")
-    features = ['Pluie', 'Niveau Lagune', 'Humidité Sol', 'Défaut Drainage']
-    vals = [rainfall/1.5, river_level*12, soil_moisture, (1-c_data['drain'])*100]
-    df_radar = pd.DataFrame(dict(r=vals, theta=features))
-    fig_radar = px.line_polar(df_radar, r='r', theta='theta', line_close=True)
-    fig_radar.update_traces(fill='toself')
-    st.plotly_chart(fig_radar, use_container_width=True)
+with t2:
+    st.subheader("Données enregistrées en base de données")
+    hist_df = get_history()
+    if not hist_df.empty:
+        st.dataframe(hist_df, use_container_width=True)
+        fig = px.line(hist_df, x='timestamp', y='risk', color='commune', title="Évolution des risques consultés")
+        st.plotly_chart(fig)
+    else:
+        st.info("Aucun historique pour le moment.")
